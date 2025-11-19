@@ -3,7 +3,8 @@ import type { Product } from '../mockData';
 
 export interface ShelfItem {
   uid: string;
-  x: number;
+  unitIndex: number; // 所属的货架组索引
+  x: number; // 相对于该组货架的X坐标
   y: number;
   product: Product;
 }
@@ -13,11 +14,15 @@ export interface LayerConfig {
   yPosition: number; // cm - absolute Y position from bottom of shelf (0 = bottom)
 }
 
+export interface ShelfUnit {
+  id: string;
+  layers: LayerConfig[];
+}
+
 interface ShelfConfig {
   totalWidth: number; // cm - width of each shelf unit
   totalHeight: number; // cm
-  unitCount: number; // number of shelf units side-by-side
-  layers: LayerConfig[]; // array of customizable layers
+  units: ShelfUnit[]; // 每组货架的独立配置
   showGrid: boolean;
   showMeasurements: boolean;
 }
@@ -25,10 +30,16 @@ interface ShelfConfig {
 interface AppState {
   // Shelf Configuration
   shelfConfig: ShelfConfig;
-  updateShelfConfig: (config: Partial<ShelfConfig>) => void;
-  updateLayerPosition: (layerId: string, yPosition: number) => void;
-  addLayer: () => void;
-  removeLayer: (layerId: string) => void;
+  updateShelfConfig: (config: Partial<Omit<ShelfConfig, 'units'>>) => void;
+  
+  // Unit Management
+  addUnit: () => void;
+  removeUnit: (unitId: string) => void;
+  
+  // Layer Management (per unit)
+  updateLayerPosition: (unitId: string, layerId: string, yPosition: number) => void;
+  addLayer: (unitId: string) => void;
+  removeLayer: (unitId: string, layerId: string) => void;
 
   // Drag & Drop State
   draggedProduct: Product | null;
@@ -49,54 +60,114 @@ const createDefaultLayers = (): LayerConfig[] => [
   { id: 'layer-4', yPosition: 160 },  // Fourth shelf at 160cm
 ];
 
+const createDefaultUnit = (index: number): ShelfUnit => ({
+  id: `unit-${index}`,
+  layers: createDefaultLayers(),
+});
+
 export const useAppStore = create<AppState>((set) => ({
   shelfConfig: {
     totalWidth: 120, // Width per unit - default 120cm
     totalHeight: 200,
-    unitCount: 2, // Start with 2 shelf units
-    layers: createDefaultLayers(),
+    units: [createDefaultUnit(0), createDefaultUnit(1)], // Start with 2 shelf units
     showGrid: true,
     showMeasurements: true,
   },
-  updateShelfConfig: (config) =>
-    set((state) => ({ shelfConfig: { ...state.shelfConfig, ...config } })),
   
-  updateLayerPosition: (layerId, yPosition) =>
+  updateShelfConfig: (config) =>
+    set((state) => ({ 
+      shelfConfig: { 
+        ...state.shelfConfig, 
+        ...config 
+      } 
+    })),
+  
+  // Unit Management
+  addUnit: () =>
     set((state) => ({
       shelfConfig: {
         ...state.shelfConfig,
-        layers: state.shelfConfig.layers.map((layer) =>
-          layer.id === layerId ? { ...layer, yPosition } : layer
+        units: [
+          ...state.shelfConfig.units,
+          createDefaultUnit(state.shelfConfig.units.length),
+        ],
+      },
+    })),
+  
+  removeUnit: (unitId) =>
+    set((state) => ({
+      shelfConfig: {
+        ...state.shelfConfig,
+        units: state.shelfConfig.units.filter((unit) => unit.id !== unitId),
+      },
+      // Also remove items from this unit
+      shelfItems: state.shelfItems.filter((item) => {
+        const unitIndex = state.shelfConfig.units.findIndex(u => u.id === unitId);
+        return item.unitIndex !== unitIndex;
+      }),
+    })),
+  
+  // Layer Management
+  updateLayerPosition: (unitId, layerId, yPosition) =>
+    set((state) => ({
+      shelfConfig: {
+        ...state.shelfConfig,
+        units: state.shelfConfig.units.map((unit) =>
+          unit.id === unitId
+            ? {
+                ...unit,
+                layers: unit.layers.map((layer) =>
+                  layer.id === layerId ? { ...layer, yPosition } : layer
+                ),
+              }
+            : unit
         ),
       },
     })),
   
-  addLayer: () =>
-    set((state) => {
-      // Find the highest current position and add 40cm above it
-      const maxY = state.shelfConfig.layers.length > 0
-        ? Math.max(...state.shelfConfig.layers.map(l => l.yPosition))
-        : 0;
-      
-      return {
-        shelfConfig: {
-          ...state.shelfConfig,
-          layers: [
-            ...state.shelfConfig.layers,
-            {
-              id: `layer-${Date.now()}`,
-              yPosition: Math.min(maxY + 40, state.shelfConfig.totalHeight - 10),
-            },
-          ],
-        },
-      };
-    }),
-  
-  removeLayer: (layerId) =>
+  addLayer: (unitId) =>
     set((state) => ({
       shelfConfig: {
         ...state.shelfConfig,
-        layers: state.shelfConfig.layers.filter((layer) => layer.id !== layerId),
+        units: state.shelfConfig.units.map((unit) => {
+          if (unit.id !== unitId) return unit;
+          
+          const maxY = unit.layers.length > 0
+            ? Math.max(...unit.layers.map(l => l.yPosition))
+            : 0;
+          
+          return {
+            ...unit,
+            layers: [
+              ...unit.layers,
+              {
+                id: `layer-${Date.now()}`,
+                yPosition: Math.min(maxY + 40, state.shelfConfig.totalHeight - 10),
+              },
+            ],
+          };
+        }),
+      },
+    })),
+  
+  removeLayer: (unitId, layerId) =>
+    set((state) => ({
+      shelfConfig: {
+        ...state.shelfConfig,
+        units: state.shelfConfig.units.map((unit) => {
+          if (unit.id !== unitId) return unit;
+          
+          // 不允许删除底层 (yPosition = 0)
+          const layerToRemove = unit.layers.find(l => l.id === layerId);
+          if (layerToRemove && layerToRemove.yPosition === 0) {
+            return unit; // 不删除底层
+          }
+          
+          return {
+            ...unit,
+            layers: unit.layers.filter((layer) => layer.id !== layerId),
+          };
+        }),
       },
     })),
 
@@ -122,4 +193,3 @@ export const useAppStore = create<AppState>((set) => ({
       shelfItems: state.shelfItems.filter((item) => item.uid !== uid),
     })),
 }));
-
