@@ -19,7 +19,7 @@ function App() {
         
         <div className="flex items-center gap-4">
           <div className="text-xs text-gray-500">
-            从右侧拖拽商品 • 右键删除 • 点击空白处拖动画布 • 滚轮缩放
+            拖拽商品 • 右键删除 • 空白处拖动查看 • 滚轮缩放 • 点击适配按钮居中
           </div>
           <button className="px-4 py-1.5 bg-gray-900 text-white text-sm font-medium rounded-md hover:bg-gray-800 transition-colors">
             导出布局

@@ -23,14 +23,33 @@ export const Workspace: React.FC = () => {
   const [position, setPosition] = useState({ x: 0, y: 0 });
   const [isDraggingStage, setIsDraggingStage] = useState(false);
 
+  const [shouldAutoFit, setShouldAutoFit] = useState(false);
+
   useEffect(() => {
     if (containerRef.current) {
-      setStageSize({
-        width: containerRef.current.offsetWidth,
-        height: containerRef.current.offsetHeight,
-      });
+      const width = containerRef.current.offsetWidth;
+      const height = containerRef.current.offsetHeight;
+      setStageSize({ width, height });
+      setShouldAutoFit(true);
     }
   }, []);
+  
+  // Auto-fit when needed
+  useEffect(() => {
+    if (shouldAutoFit && stageSize.width > 0) {
+      setTimeout(() => {
+        handleFitToScreen();
+        setShouldAutoFit(false);
+      }, 100);
+    }
+  }, [shouldAutoFit, stageSize.width]);
+  
+  // Auto-fit when shelf configuration changes significantly
+  useEffect(() => {
+    if (stageSize.width > 0) {
+      setShouldAutoFit(true);
+    }
+  }, [shelfConfig.unitCount, shelfConfig.totalWidth, shelfConfig.totalHeight, stageSize.width]);
 
   // Find nearest shelf layer for gravity snapping - returns the Y position where item should rest
   const findNearestShelfBelow = (itemBottomY: number): number => {
