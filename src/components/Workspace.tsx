@@ -1,5 +1,5 @@
 import React, { useRef, useState, useEffect } from 'react';
-import { Stage, Layer, Rect, Text, Group, Line } from 'react-konva';
+import { Stage, Layer, Rect, Text, Group, Line, Arrow } from 'react-konva';
 import Konva from 'konva';
 import { ZoomIn, ZoomOut, Maximize2, Hand } from 'lucide-react';
 import { useAppStore } from '../store/useAppStore';
@@ -22,7 +22,9 @@ export const Workspace: React.FC = () => {
   const [scale, setScale] = useState(1);
   const [position, setPosition] = useState({ x: 0, y: 0 });
   const [isDraggingStage, setIsDraggingStage] = useState(false);
-  const [isPanMode, setIsPanMode] = useState(false); // 手抓模式
+  const [isPanMode, setIsPanMode] = useState(false);
+  const [highlightedLayerId, setHighlightedLayerId] = useState<string | null>(null);
+  const [draggedItemUid, setDraggedItemUid] = useState<string | null>(null);
 
   useEffect(() => {
     if (containerRef.current) {
@@ -33,34 +35,232 @@ export const Workspace: React.FC = () => {
     }
   }, []);
 
-  // Find nearest shelf layer for gravity snapping - returns the Y position where item should rest
-  // unitIndex: 货架组索引
-  const findNearestShelfBelow = (unitIndex: number, itemBottomY: number): number => {
+  /**
+   * Helper: Get the width of a specific unit (with fallback to default)
+   */
+  const getUnitWidth = (unitIndex: number): number => {
     const unit = shelfConfig.units[unitIndex];
-    if (!unit || unit.layers.length === 0) return 0;
+    return unit?.width ?? shelfConfig.defaultUnitWidth;
+  };
+
+  /**
+   * Helper: Calculate cumulative X positions for all units
+   * Returns array of [startX_0, startX_1, ..., startX_n]
+   */
+  const calculateUnitXPositions = (): number[] => {
+    const positions: number[] = [];
+    let cumulativeX = 0;
     
-    // Sort layers by position (ascending)
-    const sortedLayers = [...unit.layers].sort((a, b) => a.yPosition - b.yPosition);
+    for (let i = 0; i < shelfConfig.units.length; i++) {
+      positions.push(cumulativeX);
+      cumulativeX += getUnitWidth(i);
+    }
     
-    // Account for shelf thickness - items rest on TOP of the shelf surface
+    return positions;
+  };
+
+  /**
+   * Helper: Find which unit a global X position falls into
+   * Returns: { unitIndex, unitRelativeX }
+   */
+  const findUnitAtX = (globalX: number): { unitIndex: number; unitRelativeX: number } => {
+    let cumulativeX = 0;
+    
+    for (let i = 0; i < shelfConfig.units.length; i++) {
+      const unitWidth = getUnitWidth(i);
+      
+      if (globalX >= cumulativeX && globalX < cumulativeX + unitWidth) {
+        return {
+          unitIndex: i,
+          unitRelativeX: globalX - cumulativeX
+        };
+      }
+      
+      cumulativeX += unitWidth;
+    }
+    
+    // If beyond the last unit, clamp to last unit
+    return {
+      unitIndex: shelfConfig.units.length - 1,
+      unitRelativeX: globalX - cumulativeX + getUnitWidth(shelfConfig.units.length - 1)
+    };
+  };
+
+  // Calculate total dimensions (sum of all unit widths)
+  const totalShelfWidthCm = shelfConfig.units.reduce((sum, _, index) => sum + getUnitWidth(index), 0);
+  const totalShelfWidthPx = totalShelfWidthCm * CM_TO_PX;
+  const totalShelfHeightPx = shelfConfig.totalHeight * CM_TO_PX;
+  const startX = (stageSize.width - totalShelfWidthPx) / 2;
+  const startY = (stageSize.height - totalShelfHeightPx) / 2;
+
+  const columnWidthPx = SHELF_DEFAULTS.COLUMN_WIDTH_CM * CM_TO_PX;
+  const shelfThicknessPx = SHELF_DEFAULTS.SHELF_THICKNESS_CM * CM_TO_PX;
+  const baseThicknessPx = SHELF_DEFAULTS.BASE_THICKNESS_CM * CM_TO_PX;
+  const shelfShorterBy = 1 * CM_TO_PX;
+
+  /**
+   * Gravity System with Stacking: Find the best surface to snap to (shelf or other items)
+   * Returns: { unitIndex, surfaceY } or null
+   */
+  const findBestSurface = (globalX: number, itemBottomY: number, itemWidth: number, currentItemUid?: string) => {
+    // Determine which unit based on X position (using dynamic widths)
+    const { unitIndex: clampedUnitIndex } = findUnitAtX(globalX);
+    
+    const unit = shelfConfig.units[clampedUnitIndex];
+    if (!unit || unit.layers.length === 0) return null;
+
     const shelfThickness = SHELF_DEFAULTS.SHELF_THICKNESS_CM;
     const baseThickness = SHELF_DEFAULTS.BASE_THICKNESS_CM;
     
-    // Find the highest layer that is below or at the item bottom (with tolerance)
-    for (let i = sortedLayers.length - 1; i >= 0; i--) {
-      const layer = sortedLayers[i];
+    let bestSurface: number | null = null;
+    let minDistance = Infinity;
+
+    // 1. Check shelf layers
+    for (const layer of unit.layers) {
       const thickness = layer.yPosition === 0 ? baseThickness : shelfThickness;
-      const layerTopY = layer.yPosition + thickness; // Top surface of the shelf
+      const layerSurfaceY = layer.yPosition + thickness; // Top surface from bottom
       
-      // Allow item to be significantly below the shelf surface and still snap back up
-      // This prevents the item from falling through when dragging horizontally with slight downward movement
-      if (layerTopY <= itemBottomY + 20) { // 20cm tolerance
-        return layerTopY; // Return the top surface position
+      const distance = Math.abs(itemBottomY - layerSurfaceY);
+      
+      if (distance < 30 && distance < minDistance) {
+        minDistance = distance;
+        bestSurface = layerSurfaceY;
       }
     }
+
+    // 2. Check other items (for stacking)
+    const itemLeft = globalX;
+    const itemRight = globalX + itemWidth;
     
-    // Default to base layer top surface
-    return baseThickness;
+    for (const existingItem of shelfItems) {
+      // Skip self when dragging existing item
+      if (currentItemUid && existingItem.uid === currentItemUid) continue;
+      
+      const existingLeft = existingItem.x;
+      const existingRight = existingItem.x + existingItem.product.width;
+      
+      // Check horizontal overlap (items must overlap by at least 30% for stacking)
+      const overlapLeft = Math.max(itemLeft, existingLeft);
+      const overlapRight = Math.min(itemRight, existingRight);
+      const overlapWidth = overlapRight - overlapLeft;
+      const minItemWidth = Math.min(itemWidth, existingItem.product.width);
+      
+      if (overlapWidth > minItemWidth * 0.3) {
+        // Calculate the top surface of the existing item (from shelf bottom)
+        const existingItemBottomY = shelfConfig.totalHeight - existingItem.y - existingItem.product.height;
+        const existingItemTopY = existingItemBottomY + existingItem.product.height;
+        
+        const distance = Math.abs(itemBottomY - existingItemTopY);
+        
+        // Only consider items within 30cm tolerance and closer than current best
+        if (distance < 30 && distance < minDistance) {
+          minDistance = distance;
+          bestSurface = existingItemTopY;
+        }
+      }
+    }
+
+    return bestSurface !== null ? { unitIndex: clampedUnitIndex, surfaceY: bestSurface } : null;
+  };
+
+  /**
+   * Check if item collides with existing items at given position
+   * Returns adjusted X position if collision detected, original X if no collision
+   */
+  const resolveHorizontalCollision = (
+    proposedX: number, 
+    proposedY: number, 
+    itemWidth: number, 
+    itemHeight: number, 
+    currentItemUid?: string
+  ): number => {
+    const tolerance = 0.5; // 0.5cm tolerance for floating point precision
+    const itemLeft = proposedX;
+    const itemRight = proposedX + itemWidth;
+    const itemTop = proposedY;
+    const itemBottom = proposedY + itemHeight;
+
+    // Check collision with each existing item
+    for (const existingItem of shelfItems) {
+      // Skip self when dragging existing item
+      if (currentItemUid && existingItem.uid === currentItemUid) continue;
+
+      const existingLeft = existingItem.x;
+      const existingRight = existingItem.x + existingItem.product.width;
+      const existingTop = existingItem.y;
+      const existingBottom = existingItem.y + existingItem.product.height;
+
+      // Check vertical overlap (are they on the same level?)
+      const verticalOverlap = !(itemBottom + tolerance < existingTop || itemTop > existingBottom + tolerance);
+      
+      if (verticalOverlap) {
+        // Check horizontal overlap
+        const horizontalOverlap = !(itemRight <= existingLeft + tolerance || itemLeft >= existingRight - tolerance);
+        
+        if (horizontalOverlap) {
+          // Collision detected! Find the best position to push to
+          const overlapLeft = itemRight - existingLeft;
+          const overlapRight = existingRight - itemLeft;
+          
+          // Push to the side with less overlap
+          if (overlapLeft < overlapRight) {
+            // Push to the left
+            const newX = existingLeft - itemWidth;
+            // Validate new position is within shelf bounds
+            if (newX >= 0) {
+              return newX;
+            }
+          } else {
+            // Push to the right
+            const newX = existingRight;
+            // Validate new position is within total shelf width
+            if (newX + itemWidth <= totalShelfWidthCm) {
+              return newX;
+            }
+          }
+          
+          // If can't resolve, try the other direction
+          if (overlapLeft < overlapRight) {
+            const newX = existingRight;
+            if (newX + itemWidth <= totalShelfWidthCm) {
+              return newX;
+            }
+          } else {
+            const newX = existingLeft - itemWidth;
+            if (newX >= 0) {
+              return newX;
+            }
+          }
+        }
+      }
+    }
+
+    return proposedX; // No collision, return original position
+  };
+
+  /**
+   * Apply gravity: snap item to nearest surface (shelf or other items)
+   */
+  const applyGravity = (globalX: number, globalY: number, itemWidth: number, itemHeight: number, currentItemUid?: string) => {
+    // Calculate item bottom position (from shelf bottom)
+    const itemBottomY = shelfConfig.totalHeight - globalY - itemHeight;
+    
+    const result = findBestSurface(globalX, itemBottomY, itemWidth, currentItemUid);
+    
+    if (result) {
+      // Snap to surface (shelf or item top)
+      const snappedY = shelfConfig.totalHeight - result.surfaceY - itemHeight;
+      
+      // Resolve horizontal collision
+      const adjustedX = resolveHorizontalCollision(globalX, snappedY, itemWidth, itemHeight, currentItemUid);
+      
+      return { x: adjustedX, y: snappedY, unitIndex: result.unitIndex };
+    }
+    
+    // No valid surface found, still check for collision at current position
+    const adjustedX = resolveHorizontalCollision(globalX, globalY, itemWidth, itemHeight, currentItemUid);
+    const { unitIndex } = findUnitAtX(adjustedX);
+    return { x: adjustedX, y: globalY, unitIndex };
   };
 
   const handleDragOver = (e: React.DragEvent) => {
@@ -77,46 +277,30 @@ export const Workspace: React.FC = () => {
     const pointerPos = stageRef.current.getPointerPosition();
     
     if (pointerPos) {
-      // Account for scale and position
+      // Convert screen coordinates to global shelf coordinates
       const adjustedX = (pointerPos.x - position.x) / scale;
       const adjustedY = (pointerPos.y - position.y) / scale;
       
-      const totalShelfWidth = shelfConfig.totalWidth * shelfConfig.units.length * CM_TO_PX;
-      const totalShelfHeight = shelfConfig.totalHeight * CM_TO_PX;
-      const shelfX = (stageSize.width - totalShelfWidth) / 2;
-      const shelfY = (stageSize.height - totalShelfHeight) / 2;
-      
-      const relativeX = (adjustedX - shelfX) / CM_TO_PX;
-      const relativeY = (adjustedY - shelfY) / CM_TO_PX;
+      const globalX = (adjustedX - startX) / CM_TO_PX;
+      const globalY = (adjustedY - startY) / CM_TO_PX;
 
-      // Determine which unit the item is dropped on
-      const unitIndex = Math.floor(relativeX / shelfConfig.totalWidth);
-      const clampedUnitIndex = Math.max(0, Math.min(shelfConfig.units.length - 1, unitIndex));
-      
-      // Calculate X relative to the unit
-      const unitRelativeX = relativeX - (clampedUnitIndex * shelfConfig.totalWidth);
+      // Center the item on cursor
+      const centeredX = globalX - draggedProduct.width / 2;
+      const centeredY = globalY - draggedProduct.height / 2;
 
-      // Calculate item bottom position in cm (from bottom of shelf)
-      const itemCenterY = shelfConfig.totalHeight - relativeY;
-      const itemBottomY = itemCenterY - draggedProduct.height / 2;
-      
-      // Apply gravity - find shelf surface below and snap to it (for this specific unit)
-      const shelfSurfaceY = findNearestShelfBelow(clampedUnitIndex, itemBottomY);
-      
-      // Place item on top of the shelf surface
-      // finalY is the top of the item, calculated from top of shelf
-      const finalY = shelfConfig.totalHeight - shelfSurfaceY - draggedProduct.height;
-      const finalX = unitRelativeX - draggedProduct.width / 2;
+      // Apply gravity (no currentItemUid for new items)
+      const result = applyGravity(centeredX, centeredY, draggedProduct.width, draggedProduct.height);
 
       addItemToShelf({
-        unitIndex: clampedUnitIndex,
-        x: finalX,
-        y: finalY,
+        unitIndex: result.unitIndex,
+        x: result.x,
+        y: result.y,
         product: draggedProduct,
       });
     }
 
     setDraggedProduct(null);
+    setHighlightedLayerId(null);
   };
 
   const handleWheel = (e: Konva.KonvaEventObject<WheelEvent>) => {
@@ -128,13 +312,9 @@ export const Workspace: React.FC = () => {
     const newScale = e.evt.deltaY > 0 ? oldScale / scaleBy : oldScale * scaleBy;
     const clampedScale = Math.max(0.3, Math.min(3, newScale));
 
-    // Calculate shelf center in viewport
-    const totalShelfWidth = shelfConfig.totalWidth * shelfConfig.units.length * CM_TO_PX;
-    const totalShelfHeight = shelfConfig.totalHeight * CM_TO_PX;
-    const shelfCenterX = (stageSize.width - totalShelfWidth) / 2 + totalShelfWidth / 2;
-    const shelfCenterY = (stageSize.height - totalShelfHeight) / 2 + totalShelfHeight / 2;
+    const shelfCenterX = (stageSize.width - totalShelfWidthPx) / 2 + totalShelfWidthPx / 2;
+    const shelfCenterY = (stageSize.height - totalShelfHeightPx) / 2 + totalShelfHeightPx / 2;
 
-    // Calculate new position to keep shelf center fixed
     const scaleChange = clampedScale / oldScale;
     setScale(clampedScale);
     setPosition({
@@ -147,11 +327,8 @@ export const Workspace: React.FC = () => {
     const oldScale = scale;
     const newScale = Math.min(3, scale * 1.2);
     
-    // Zoom from shelf center
-    const totalShelfWidth = shelfConfig.totalWidth * shelfConfig.units.length * CM_TO_PX;
-    const totalShelfHeight = shelfConfig.totalHeight * CM_TO_PX;
-    const shelfCenterX = (stageSize.width - totalShelfWidth) / 2 + totalShelfWidth / 2;
-    const shelfCenterY = (stageSize.height - totalShelfHeight) / 2 + totalShelfHeight / 2;
+    const shelfCenterX = (stageSize.width - totalShelfWidthPx) / 2 + totalShelfWidthPx / 2;
+    const shelfCenterY = (stageSize.height - totalShelfHeightPx) / 2 + totalShelfHeightPx / 2;
     
     const scaleChange = newScale / oldScale;
     setScale(newScale);
@@ -165,11 +342,8 @@ export const Workspace: React.FC = () => {
     const oldScale = scale;
     const newScale = Math.max(0.3, scale / 1.2);
     
-    // Zoom from shelf center
-    const totalShelfWidth = shelfConfig.totalWidth * shelfConfig.units.length * CM_TO_PX;
-    const totalShelfHeight = shelfConfig.totalHeight * CM_TO_PX;
-    const shelfCenterX = (stageSize.width - totalShelfWidth) / 2 + totalShelfWidth / 2;
-    const shelfCenterY = (stageSize.height - totalShelfHeight) / 2 + totalShelfHeight / 2;
+    const shelfCenterX = (stageSize.width - totalShelfWidthPx) / 2 + totalShelfWidthPx / 2;
+    const shelfCenterY = (stageSize.height - totalShelfHeightPx) / 2 + totalShelfHeightPx / 2;
     
     const scaleChange = newScale / oldScale;
     setScale(newScale);
@@ -180,31 +354,20 @@ export const Workspace: React.FC = () => {
   };
 
   const handleFitToScreen = () => {
-    const totalShelfWidth = shelfConfig.totalWidth * shelfConfig.units.length * CM_TO_PX;
-    const totalShelfHeight = shelfConfig.totalHeight * CM_TO_PX;
-    
-    // Calculate optimal scale to fit the shelf with padding (留出10%边距)
     const paddingFactor = 0.9;
-    const scaleX = (stageSize.width * paddingFactor) / totalShelfWidth;
-    const scaleY = (stageSize.height * paddingFactor) / totalShelfHeight;
-    
-    // Use the smaller scale to ensure both dimensions fit
-    // Cap between 0.1x (minimum) and 2x (maximum) for usability
+    const scaleX = (stageSize.width * paddingFactor) / totalShelfWidthPx;
+    const scaleY = (stageSize.height * paddingFactor) / totalShelfHeightPx;
     const newScale = Math.max(0.1, Math.min(2, Math.min(scaleX, scaleY)));
     
-    // The shelf's original position (before any transform) in the stage
-    const originalShelfX = (stageSize.width - totalShelfWidth) / 2;
-    const originalShelfY = (stageSize.height - totalShelfHeight) / 2;
+    const originalShelfX = (stageSize.width - totalShelfWidthPx) / 2;
+    const originalShelfY = (stageSize.height - totalShelfHeightPx) / 2;
     
-    // Calculate the shelf center in original coordinates
-    const shelfCenterX = originalShelfX + totalShelfWidth / 2;
-    const shelfCenterY = originalShelfY + totalShelfHeight / 2;
+    const shelfCenterX = originalShelfX + totalShelfWidthPx / 2;
+    const shelfCenterY = originalShelfY + totalShelfHeightPx / 2;
     
-    // After scaling, the shelf center should be at the viewport center
     const viewportCenterX = stageSize.width / 2;
     const viewportCenterY = stageSize.height / 2;
     
-    // Calculate position offset to center the scaled shelf
     setScale(newScale);
     setPosition({
       x: viewportCenterX - shelfCenterX * newScale,
@@ -216,23 +379,18 @@ export const Workspace: React.FC = () => {
     setIsPanMode(!isPanMode);
   };
 
-  // Calculate total shelf dimensions
-  const totalShelfWidthPx = shelfConfig.totalWidth * shelfConfig.units.length * CM_TO_PX;
-  const totalShelfHeightPx = shelfConfig.totalHeight * CM_TO_PX;
-  const startX = (stageSize.width - totalShelfWidthPx) / 2;
-  const startY = (stageSize.height - totalShelfHeightPx) / 2;
-
-  const columnWidthPx = SHELF_DEFAULTS.COLUMN_WIDTH_CM * CM_TO_PX;
-  const shelfThicknessPx = SHELF_DEFAULTS.SHELF_THICKNESS_CM * CM_TO_PX;
-  const baseThicknessPx = SHELF_DEFAULTS.BASE_THICKNESS_CM * CM_TO_PX;
-  const shelfShorterBy = 1 * CM_TO_PX; // 层板比货架宽度短1cm
-
-  // Render a single shelf unit with its own layers
+  /**
+   * Render a single shelf unit
+   */
   const renderShelfUnit = (unitIndex: number) => {
     const unit = shelfConfig.units[unitIndex];
     if (!unit) return null;
-    const unitX = unitIndex * shelfConfig.totalWidth * CM_TO_PX;
-    const unitWidthPx = shelfConfig.totalWidth * CM_TO_PX;
+    
+    // Use dynamic X position and width
+    const unitXPositions = calculateUnitXPositions();
+    const unitX = unitXPositions[unitIndex] * CM_TO_PX;
+    const unitWidthCm = getUnitWidth(unitIndex);
+    const unitWidthPx = unitWidthCm * CM_TO_PX;
 
     return (
       <Group key={`unit-${unitIndex}`} x={unitX}>
@@ -270,11 +428,36 @@ export const Workspace: React.FC = () => {
           shadowOffsetX={-2}
         />
 
-        {/* Grid Lines (optional) */}
+        {/* Dimension Indicator - Width Arrow */}
+        <Arrow
+          points={[
+            columnWidthPx + 5,
+            -15,
+            unitWidthPx - columnWidthPx - 5,
+            -15
+          ]}
+          stroke="#374151"
+          strokeWidth={1.5}
+          fill="#374151"
+          pointerLength={6}
+          pointerWidth={6}
+          pointerAtBeginning
+        />
+        <Text
+          x={0}
+          y={-35}
+          width={unitWidthPx}
+          text={`${unitWidthCm} cm`}
+          fontSize={12}
+          fontStyle="bold"
+          fill="#374151"
+          align="center"
+        />
+
+        {/* Grid Lines */}
         {shelfConfig.showGrid && (
           <>
-            {/* Vertical grid every 10cm */}
-            {Array.from({ length: Math.floor(shelfConfig.totalWidth / 10) - 1 }).map((_, i) => (
+            {Array.from({ length: Math.floor(unitWidthCm / 10) - 1 }).map((_, i) => (
               <Line
                 key={`v-grid-${i}`}
                 points={[(i + 1) * 10 * CM_TO_PX, 0, (i + 1) * 10 * CM_TO_PX, totalShelfHeightPx]}
@@ -287,37 +470,76 @@ export const Workspace: React.FC = () => {
           </>
         )}
 
-        {/* Render layers for this specific unit */}
+        {/* Render layers for this unit */}
         {unit.layers.map((layer) => {
           const yPos = totalShelfHeightPx - (layer.yPosition * CM_TO_PX);
           const isBase = layer.yPosition === 0;
           const thickness = isBase ? baseThicknessPx : shelfThicknessPx;
           const shelfWidth = unitWidthPx - shelfShorterBy * 2;
+          const isHighlighted = highlightedLayerId === `${unitIndex}-${layer.id}`;
 
-          return (
-            <Group key={layer.id} y={yPos}>
-              {/* Shelf Surface */}
-              <Rect
-                x={shelfShorterBy}
-                y={-thickness}
-                width={shelfWidth}
-                height={thickness}
-                fill={SHELF_COLORS.COLOR_SHELF_SURFACE}
-                shadowColor={SHELF_COLORS.COLOR_SHADOW}
-                shadowBlur={3}
-                shadowOffsetY={2}
-              />
-              
-              {/* Shelf Front Edge */}
-              <Rect
-                x={shelfShorterBy}
-                y={-thickness / 3}
-                width={shelfWidth}
-                height={thickness / 2}
-                fill={SHELF_COLORS.COLOR_SHELF_EDGE}
-              />
-            </Group>
-          );
+          // Render based on layer type
+          if (layer.type === 'hook') {
+            // Hook Rail rendering - clean horizontal bar
+            return (
+              <Group key={layer.id} y={yPos}>
+                {/* Hook Rail - Light grey horizontal bar */}
+                <Rect
+                  x={shelfShorterBy}
+                  y={-5}
+                  width={shelfWidth}
+                  height={10}
+                  fill="#e5e7eb"
+                  stroke={isHighlighted ? '#8b5cf6' : '#d1d5db'}
+                  strokeWidth={isHighlighted ? 3 : 1}
+                  cornerRadius={3}
+                  shadowColor="rgba(0,0,0,0.1)"
+                  shadowBlur={2}
+                  shadowOffsetY={1}
+                />
+                
+                {/* Visual indicator text */}
+                {isHighlighted && (
+                  <Text
+                    x={shelfShorterBy}
+                    y={12}
+                    text="挂钩区"
+                    fontSize={10}
+                    fill="#8b5cf6"
+                    fontStyle="bold"
+                  />
+                )}
+              </Group>
+            );
+          } else {
+            // Standard flat shelf rendering
+            return (
+              <Group key={layer.id} y={yPos}>
+                {/* Shelf Surface */}
+                <Rect
+                  x={shelfShorterBy}
+                  y={-thickness}
+                  width={shelfWidth}
+                  height={thickness}
+                  fill={SHELF_COLORS.COLOR_SHELF_SURFACE}
+                  stroke={isHighlighted ? '#3b82f6' : 'transparent'}
+                  strokeWidth={isHighlighted ? 3 : 0}
+                  shadowColor={SHELF_COLORS.COLOR_SHADOW}
+                  shadowBlur={3}
+                  shadowOffsetY={2}
+                />
+                
+                {/* Shelf Front Edge */}
+                <Rect
+                  x={shelfShorterBy}
+                  y={-thickness / 3}
+                  width={shelfWidth}
+                  height={thickness / 2}
+                  fill={SHELF_COLORS.COLOR_SHELF_EDGE}
+                />
+              </Group>
+            );
+          }
         })}
       </Group>
     );
@@ -333,8 +555,8 @@ export const Workspace: React.FC = () => {
       {/* Toolbar/Info */}
       <div className="absolute top-4 left-4 z-10 bg-white/90 backdrop-blur px-3 py-2 rounded-lg shadow-sm text-xs text-gray-600 space-y-1">
         <div>画布: {Math.round(stageSize.width)}x{Math.round(stageSize.height)}px</div>
-        <div>货架: {shelfConfig.units.length} × {shelfConfig.totalWidth}cm</div>
-        <div>货架组: {shelfConfig.units.length}</div>
+        <div>货架组: {shelfConfig.units.length} 组</div>
+        <div>总宽: {totalShelfWidthCm} cm</div>
         <div>缩放: {Math.round(scale * 100)}%</div>
       </div>
 
@@ -387,10 +609,8 @@ export const Workspace: React.FC = () => {
         draggable={isDraggingStage || isPanMode}
         onMouseDown={(e) => {
           if (isPanMode) {
-            // 在手抓模式下，总是允许拖动画布
             setIsDraggingStage(true);
           } else {
-            // 普通模式：只有点击空白区域才允许拖动
             const clickedOnEmpty = e.target === e.target.getStage();
             setIsDraggingStage(clickedOnEmpty);
           }
@@ -408,28 +628,32 @@ export const Workspace: React.FC = () => {
         }}
         style={{ cursor: isPanMode ? 'grab' : 'default' }}
       >
+        {/* Shelf Layer - Background */}
         <Layer>
-          {/* Main Shelf Group */}
           <Group x={startX} y={startY}>
             {/* Render all shelf units */}
             {Array.from({ length: shelfConfig.units.length }).map((_, i) => renderShelfUnit(i))}
 
-            {/* Unit Separator Lines (dark lines between units) */}
-            {Array.from({ length: shelfConfig.units.length - 1 }).map((_, i) => (
-              <Line
-                key={`separator-${i}`}
-                points={[
-                  (i + 1) * shelfConfig.totalWidth * CM_TO_PX, 
-                  0, 
-                  (i + 1) * shelfConfig.totalWidth * CM_TO_PX, 
-                  totalShelfHeightPx
-                ]}
-                stroke="#333333"
-                strokeWidth={3}
-              />
-            ))}
-
-            {/* Layers are now rendered inside each unit's renderShelfUnit function */}
+            {/* Unit Separator Lines (using dynamic X positions) */}
+            {(() => {
+              const unitXPositions = calculateUnitXPositions();
+              return Array.from({ length: shelfConfig.units.length - 1 }).map((_, i) => {
+                const separatorX = (unitXPositions[i + 1]) * CM_TO_PX;
+                return (
+                  <Line
+                    key={`separator-${i}`}
+                    points={[
+                      separatorX, 
+                      0, 
+                      separatorX, 
+                      totalShelfHeightPx
+                    ]}
+                    stroke="#333333"
+                    strokeWidth={3}
+                  />
+                );
+              });
+            })()}
 
             {/* Outer Border */}
             <Rect
@@ -442,24 +666,20 @@ export const Workspace: React.FC = () => {
               fill="transparent"
             />
 
-            {/* Horizontal Grid Lines are now rendered per unit inside renderShelfUnit */}
-
             {/* Measurements */}
             {shelfConfig.showMeasurements && (
               <>
-                {/* Total Width Label */}
                 <Text
                   x={totalShelfWidthPx / 2 - 40}
-                  y={-30}
-                  text={`${shelfConfig.totalWidth * shelfConfig.units.length} cm`}
+                  y={-50}
+                  text={`总宽: ${totalShelfWidthCm} cm`}
                   fontSize={14}
                   fontStyle="bold"
                   fill="#555"
                 />
                 
-                {/* Height Label */}
                 <Text
-                  x={-50}
+                  x={-70}
                   y={totalShelfHeightPx / 2}
                   text={`${shelfConfig.totalHeight} cm`}
                   fontSize={14}
@@ -467,23 +687,28 @@ export const Workspace: React.FC = () => {
                   fill="#555"
                   rotation={-90}
                 />
-
-                {/* Layer position labels - could be added per unit if needed */}
               </>
             )}
+          </Group>
+        </Layer>
 
-            {/* Items on Shelf */}
+        {/* Product Layer - Top Layer (Flattened Scene) */}
+        <Layer>
+          <Group x={startX} y={startY}>
             {shelfItems.map((item) => {
-              // Calculate absolute X position based on unit index
-              const unitX = item.unitIndex * shelfConfig.totalWidth;
-              const absoluteX = (unitX + item.x) * CM_TO_PX;
+              const globalXPx = item.x * CM_TO_PX;
+              const globalYPx = item.y * CM_TO_PX;
+              const isHanging = item.product.displayType === 'hanging';
+              const itemWidthPx = item.product.width * CM_TO_PX;
+              const itemHeightPx = item.product.height * CM_TO_PX;
               
               return (
                 <Group
                   key={item.uid}
-                  x={absoluteX}
-                  y={item.y * CM_TO_PX}
+                  x={globalXPx}
+                  y={globalYPx}
                   draggable={!isPanMode}
+                  opacity={draggedItemUid === item.uid ? 0.7 : 1}
                   onMouseDown={(e) => {
                     if (!isPanMode) {
                       e.cancelBubble = true;
@@ -494,32 +719,51 @@ export const Workspace: React.FC = () => {
                     if (!isPanMode) {
                       e.cancelBubble = true;
                       setIsDraggingStage(false);
+                      setDraggedItemUid(item.uid);
                     }
                   }}
                   onDragMove={(e) => {
                     if (!isPanMode) {
                       e.cancelBubble = true;
                       setIsDraggingStage(false);
+                      
+                      // Highlight target layer during drag
+                      const newGlobalX = e.target.x() / CM_TO_PX;
+                      const newGlobalY = e.target.y() / CM_TO_PX;
+                      const itemBottomY = shelfConfig.totalHeight - newGlobalY - item.product.height;
+                      
+                      const result = findBestSurface(newGlobalX, itemBottomY, item.product.width, item.uid);
+                      if (result) {
+                        const unit = shelfConfig.units[result.unitIndex];
+                        const layer = unit?.layers.find(l => {
+                          const thickness = l.yPosition === 0 ? SHELF_DEFAULTS.BASE_THICKNESS_CM : SHELF_DEFAULTS.SHELF_THICKNESS_CM;
+                          return Math.abs((l.yPosition + thickness) - result.surfaceY) < 0.1;
+                        });
+                        if (layer) {
+                          setHighlightedLayerId(`${result.unitIndex}-${layer.id}`);
+                        } else {
+                          // Might be landing on another item, clear highlight
+                          setHighlightedLayerId(null);
+                        }
+                      } else {
+                        setHighlightedLayerId(null);
+                      }
                     }
                   }}
                   onDragEnd={(e) => {
                     if (!isPanMode) {
                       e.cancelBubble = true;
-                      const newAbsoluteX = e.target.x() / CM_TO_PX;
-                      const newY = e.target.y() / CM_TO_PX;
                       
-                      // Determine which unit based on X position
-                      const newUnitIndex = Math.floor(newAbsoluteX / shelfConfig.totalWidth);
-                      const clampedUnitIndex = Math.max(0, Math.min(shelfConfig.units.length - 1, newUnitIndex));
-                      const unitRelativeX = newAbsoluteX - (clampedUnitIndex * shelfConfig.totalWidth);
+                      const newGlobalX = e.target.x() / CM_TO_PX;
+                      const newGlobalY = e.target.y() / CM_TO_PX;
                       
-                      // Apply gravity when dragging - snap to shelf surface
-                      const itemBottomY = shelfConfig.totalHeight - newY - item.product.height;
-                      const shelfSurfaceY = findNearestShelfBelow(clampedUnitIndex, itemBottomY);
-                      const finalY = shelfConfig.totalHeight - shelfSurfaceY - item.product.height;
+                      // Apply gravity with stacking support and collision resolution
+                      const result = applyGravity(newGlobalX, newGlobalY, item.product.width, item.product.height, item.uid);
                       
-                      updateItemPosition(item.uid, unitRelativeX, finalY);
+                      updateItemPosition(item.uid, result.x, result.y);
                       setIsDraggingStage(false);
+                      setHighlightedLayerId(null);
+                      setDraggedItemUid(null);
                     }
                   }}
                   onContextMenu={(e) => {
@@ -527,33 +771,58 @@ export const Workspace: React.FC = () => {
                     removeItemFromShelf(item.uid);
                   }}
                 >
-                <Rect
-                  width={item.product.width * CM_TO_PX}
-                  height={item.product.height * CM_TO_PX}
-                  fill={item.product.color}
-                  stroke="rgba(0,0,0,0.2)"
-                  strokeWidth={2}
-                  cornerRadius={3}
-                  shadowColor="black"
-                  shadowBlur={5}
-                  shadowOpacity={0.3}
-                  shadowOffsetY={2}
-                />
-                <Text
-                  width={item.product.width * CM_TO_PX}
-                  text={item.product.name}
-                  fontSize={10}
-                  fill="white"
-                  align="center"
-                  verticalAlign="middle"
-                  y={item.product.height * CM_TO_PX / 2 - 5}
-                  ellipsis={true}
-                  wrap="none"
-                  shadowColor="black"
-                  shadowBlur={2}
-                />
-              </Group>
-            );
+                  {/* Hanging straps - simple vertical lines (front view) */}
+                  {isHanging && (() => {
+                    // Calculate number of hanging points based on item width
+                    const hookCount = Math.max(1, Math.min(Math.ceil(item.product.width / 6), 5));
+                    const hookSpacing = itemWidthPx / (hookCount + 1);
+                    
+                    return Array.from({ length: hookCount }).map((_, hookIndex) => {
+                      const hookX = hookSpacing * (hookIndex + 1);
+                      return (
+                        <Line
+                          key={`strap-${hookIndex}`}
+                          points={[hookX, -2, hookX, 6]}
+                          stroke="#4b5563"
+                          strokeWidth={2}
+                          lineCap="round"
+                          opacity={0.8}
+                        />
+                      );
+                    });
+                  })()}
+                  
+                  {/* Product body */}
+                  <Rect
+                    y={isHanging ? 6 : 0}
+                    width={itemWidthPx}
+                    height={itemHeightPx}
+                    fill={item.product.color}
+                    stroke={draggedItemUid === item.uid ? "#3b82f6" : "rgba(0,0,0,0.2)"}
+                    strokeWidth={draggedItemUid === item.uid ? 3 : 2}
+                    cornerRadius={3}
+                    shadowColor="black"
+                    shadowBlur={5}
+                    shadowOpacity={0.3}
+                    shadowOffsetY={2}
+                  />
+                  
+                  {/* Product label */}
+                  <Text
+                    y={(isHanging ? 6 : 0) + itemHeightPx / 2 - 5}
+                    width={itemWidthPx}
+                    text={item.product.name}
+                    fontSize={10}
+                    fill="white"
+                    align="center"
+                    verticalAlign="middle"
+                    ellipsis={true}
+                    wrap="none"
+                    shadowColor="black"
+                    shadowBlur={2}
+                  />
+                </Group>
+              );
             })}
           </Group>
         </Layer>

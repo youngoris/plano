@@ -1,31 +1,6 @@
 import { create } from 'zustand';
 import type { Product } from '../mockData';
-
-export interface ShelfItem {
-  uid: string;
-  unitIndex: number; // 所属的货架组索引
-  x: number; // 相对于该组货架的X坐标
-  y: number;
-  product: Product;
-}
-
-export interface LayerConfig {
-  id: string;
-  yPosition: number; // cm - absolute Y position from bottom of shelf (0 = bottom)
-}
-
-export interface ShelfUnit {
-  id: string;
-  layers: LayerConfig[];
-}
-
-interface ShelfConfig {
-  totalWidth: number; // cm - width of each shelf unit
-  totalHeight: number; // cm
-  units: ShelfUnit[]; // 每组货架的独立配置
-  showGrid: boolean;
-  showMeasurements: boolean;
-}
+import type { ShelfUnit, LayerConfig, ShelfItem, ShelfConfig } from '../types';
 
 interface AppState {
   // Shelf Configuration
@@ -35,9 +10,11 @@ interface AppState {
   // Unit Management
   addUnit: () => void;
   removeUnit: (unitId: string) => void;
+  updateUnitWidth: (unitId: string, width: number) => void; // NEW: Update specific unit width
   
   // Layer Management (per unit)
   updateLayerPosition: (unitId: string, layerId: string, yPosition: number) => void;
+  updateLayerType: (unitId: string, layerId: string, type: 'flat' | 'hook') => void;
   addLayer: (unitId: string) => void;
   removeLayer: (unitId: string, layerId: string) => void;
 
@@ -53,21 +30,22 @@ interface AppState {
 }
 
 const createDefaultLayers = (): LayerConfig[] => [
-  { id: 'layer-0', yPosition: 0 },    // Base layer at bottom
-  { id: 'layer-1', yPosition: 40 },   // First shelf at 40cm
-  { id: 'layer-2', yPosition: 80 },   // Second shelf at 80cm
-  { id: 'layer-3', yPosition: 120 },  // Third shelf at 120cm
-  { id: 'layer-4', yPosition: 160 },  // Fourth shelf at 160cm
+  { id: 'layer-0', yPosition: 0, type: 'flat' },    // Base layer at bottom
+  { id: 'layer-1', yPosition: 40, type: 'flat' },   // First shelf at 40cm
+  { id: 'layer-2', yPosition: 80, type: 'flat' },   // Second shelf at 80cm
+  { id: 'layer-3', yPosition: 120, type: 'flat' },  // Third shelf at 120cm
+  { id: 'layer-4', yPosition: 160, type: 'flat' },  // Fourth shelf at 160cm
 ];
 
 const createDefaultUnit = (index: number): ShelfUnit => ({
   id: `unit-${index}`,
+  // width is undefined by default, will use defaultUnitWidth
   layers: createDefaultLayers(),
 });
 
 export const useAppStore = create<AppState>((set) => ({
   shelfConfig: {
-    totalWidth: 120, // Width per unit - default 120cm
+    defaultUnitWidth: 120, // Default width for new units
     totalHeight: 200,
     units: [createDefaultUnit(0), createDefaultUnit(1)], // Start with 2 shelf units
     showGrid: true,
@@ -107,6 +85,16 @@ export const useAppStore = create<AppState>((set) => ({
       }),
     })),
   
+  updateUnitWidth: (unitId, width) =>
+    set((state) => ({
+      shelfConfig: {
+        ...state.shelfConfig,
+        units: state.shelfConfig.units.map((unit) =>
+          unit.id === unitId ? { ...unit, width } : unit
+        ),
+      },
+    })),
+  
   // Layer Management
   updateLayerPosition: (unitId, layerId, yPosition) =>
     set((state) => ({
@@ -118,6 +106,23 @@ export const useAppStore = create<AppState>((set) => ({
                 ...unit,
                 layers: unit.layers.map((layer) =>
                   layer.id === layerId ? { ...layer, yPosition } : layer
+                ),
+              }
+            : unit
+        ),
+      },
+    })),
+  
+  updateLayerType: (unitId, layerId, type) =>
+    set((state) => ({
+      shelfConfig: {
+        ...state.shelfConfig,
+        units: state.shelfConfig.units.map((unit) =>
+          unit.id === unitId
+            ? {
+                ...unit,
+                layers: unit.layers.map((layer) =>
+                  layer.id === layerId ? { ...layer, type } : layer
                 ),
               }
             : unit
@@ -143,6 +148,7 @@ export const useAppStore = create<AppState>((set) => ({
               {
                 id: `layer-${Date.now()}`,
                 yPosition: Math.min(maxY + 40, state.shelfConfig.totalHeight - 10),
+                type: 'flat', // Default to flat shelf
               },
             ],
           };

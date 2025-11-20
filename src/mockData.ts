@@ -1,11 +1,12 @@
 export interface Product {
   id: string;
   name: string;
-  category: 'cleaning' | 'storage' | 'textile';
+  category: 'cleaning' | 'storage' | 'textile' | 'hanging';
   width: number; // in cm
   height: number; // in cm
   color: string;
   thumbnail?: string; // URL or placeholder
+  displayType?: 'flat' | 'hanging'; // How the product should be displayed
 }
 
 export const mockProducts: Product[] = [
@@ -23,5 +24,12 @@ export const mockProducts: Product[] = [
   { id: 'p10', name: '日式条纹毛巾', category: 'textile', width: 15, height: 5, color: '#fb7185' }, // Rose-400
   { id: 'p11', name: '四季通用抱枕', category: 'textile', width: 45, height: 45, color: '#f87171' }, // Red-400
   { id: 'p12', name: '全棉床单(1.8m)', category: 'textile', width: 35, height: 8, color: '#ef4444' }, // Red-500
+
+  // Hanging products (for hook/pegboard display)
+  { id: 'h1', name: '挂钩-不锈钢锅铲', category: 'hanging', width: 8, height: 30, color: '#8b5cf6', displayType: 'hanging' }, // Purple-500
+  { id: 'h2', name: '挂钩-厨房毛巾', category: 'hanging', width: 12, height: 20, color: '#a78bfa', displayType: 'hanging' }, // Violet-400
+  { id: 'h3', name: '挂钩-小漏勺', category: 'hanging', width: 10, height: 25, color: '#c084fc', displayType: 'hanging' }, // Purple-400
+  { id: 'h4', name: '挂钩-钥匙扣', category: 'hanging', width: 6, height: 15, color: '#d8b4fe', displayType: 'hanging' }, // Purple-300
+  { id: 'h5', name: '挂钩-收纳袋', category: 'hanging', width: 15, height: 35, color: '#14b8a6', displayType: 'hanging' }, // Teal-500
 ];
 

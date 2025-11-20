@@ -6,17 +6,17 @@ export const ConfigPanel: React.FC = () => {
   const { 
     shelfConfig, 
     updateShelfConfig, 
-    updateLayerPosition, 
+    updateLayerPosition,
+    updateLayerType,
     addLayer, 
     removeLayer,
     addUnit,
-    removeUnit
+    removeUnit,
+    updateUnitWidth
   } = useAppStore();
 
   const [selectedUnitId, setSelectedUnitId] = useState<string>(shelfConfig.units[0]?.id || '');
   const [expandedUnits, setExpandedUnits] = useState<Set<string>>(new Set([shelfConfig.units[0]?.id]));
-
-  const selectedUnit = shelfConfig.units.find(u => u.id === selectedUnitId);
 
   const toggleUnitExpand = (unitId: string) => {
     const newExpanded = new Set(expandedUnits);
@@ -43,14 +43,15 @@ export const ConfigPanel: React.FC = () => {
           <div className="space-y-3">
             <div>
               <label className="block text-xs font-medium text-gray-700 mb-1">
-                单组宽度 (cm)
+                默认货架宽度 (cm)
               </label>
               <input
                 type="number"
-                value={shelfConfig.totalWidth}
-                onChange={(e) => updateShelfConfig({ totalWidth: Number(e.target.value) })}
+                value={shelfConfig.defaultUnitWidth}
+                onChange={(e) => updateShelfConfig({ defaultUnitWidth: Number(e.target.value) })}
                 className="w-full px-3 py-2 bg-white border border-gray-300 rounded-md text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent"
               />
+              <p className="text-xs text-gray-500 mt-1">新建货架组的默认宽度</p>
             </div>
 
             <div>
@@ -141,8 +142,30 @@ export const ConfigPanel: React.FC = () => {
 
                   {/* Unit Layers (Expandable) */}
                   {isExpanded && (
-                    <div className="p-3 pt-0 space-y-2 border-t border-gray-100">
-                      <div className="flex items-center justify-between mb-2">
+                    <div className="p-3 pt-0 space-y-3 border-t border-gray-100">
+                      {/* Unit Width Configuration */}
+                      <div className="bg-blue-50 border border-blue-200 rounded-lg p-3">
+                        <label className="block text-xs font-medium text-blue-900 mb-2">
+                          本组宽度 (cm)
+                        </label>
+                        <input
+                          type="number"
+                          min={30}
+                          max={300}
+                          step={10}
+                          value={unit.width ?? shelfConfig.defaultUnitWidth}
+                          onChange={(e) => updateUnitWidth(unit.id, Number(e.target.value))}
+                          className="w-full px-3 py-2 bg-white border border-blue-300 rounded-md text-sm font-semibold text-blue-700 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+                          placeholder={`默认: ${shelfConfig.defaultUnitWidth}cm`}
+                        />
+                        {!unit.width && (
+                          <p className="text-xs text-blue-600 mt-1.5">
+                            使用默认宽度 {shelfConfig.defaultUnitWidth}cm
+                          </p>
+                        )}
+                      </div>
+
+                      <div className="flex items-center justify-between">
                         <span className="text-xs font-medium text-gray-600">层板配置</span>
                         <button
                           onClick={() => addLayer(unit.id)}
@@ -166,37 +189,69 @@ export const ConfigPanel: React.FC = () => {
                             <div key={layer.id} className="space-y-1.5">
                               {/* Layer Item - Compact Design */}
                               <div className="flex items-center gap-2 bg-white border border-gray-200 hover:border-blue-300 p-2.5 rounded-lg transition-colors group">
-                                <div className="flex items-center gap-2 flex-1">
-                                  <span className="text-xs font-medium text-gray-700 min-w-[60px]">
-                                    {isBase ? '底层' : `第 ${sortedLayers.length - sortedIndex - 1} 层`}
-                                  </span>
-                                  
-                                  {/* Gap Height Input (Primary Control) */}
-                                  {gapHeight !== null && (
-                                    <div className="flex items-center gap-1.5 flex-1">
-                                      <span className="text-xs text-gray-400">↕</span>
-                                      <input
-                                        type="number"
-                                        min={5}
-                                        max={shelfConfig.totalHeight}
-                                        step={1}
-                                        value={gapHeight}
-                                        onChange={(e) => {
-                                          const newGap = Number(e.target.value);
-                                          const newUpperPosition = nextLayer.yPosition + newGap;
-                                          if (newUpperPosition <= shelfConfig.totalHeight && newUpperPosition >= 0) {
-                                            updateLayerPosition(unit.id, layer.id, newUpperPosition);
-                                          }
-                                        }}
-                                        className="w-16 px-2 py-1 text-sm font-semibold text-center border border-blue-200 bg-blue-50 text-blue-600 rounded focus:outline-none focus:ring-2 focus:ring-blue-400 focus:border-blue-400"
-                                      />
-                                      <span className="text-xs text-gray-500">cm</span>
+                                <div className="flex flex-col gap-2 flex-1">
+                                  {/* Layer Header with Type Toggle */}
+                                  <div className="flex items-center gap-2">
+                                    <span className="text-xs font-medium text-gray-700 min-w-[60px]">
+                                      {isBase ? '底层' : `第 ${sortedLayers.length - sortedIndex - 1} 层`}
+                                    </span>
+                                    
+                                    {/* Layer Type Toggle */}
+                                    <div className="flex items-center gap-1 bg-gray-100 rounded-md p-0.5">
+                                      <button
+                                        onClick={() => updateLayerType(unit.id, layer.id, 'flat')}
+                                        className={`px-2 py-0.5 text-xs rounded transition-all ${
+                                          layer.type === 'flat'
+                                            ? 'bg-white text-gray-900 font-semibold shadow-sm'
+                                            : 'text-gray-600 hover:text-gray-900'
+                                        }`}
+                                        title="标准层板"
+                                      >
+                                        层板
+                                      </button>
+                                      <button
+                                        onClick={() => updateLayerType(unit.id, layer.id, 'hook')}
+                                        className={`px-2 py-0.5 text-xs rounded transition-all ${
+                                          layer.type === 'hook'
+                                            ? 'bg-purple-500 text-white font-semibold shadow-sm'
+                                            : 'text-gray-600 hover:text-gray-900'
+                                        }`}
+                                        title="挂钩/洞洞板"
+                                      >
+                                        挂钩
+                                      </button>
                                     </div>
-                                  )}
+                                  </div>
                                   
-                                  {isBase && (
-                                    <span className="text-xs text-gray-400 italic">固定</span>
-                                  )}
+                                  {/* Gap Height Controls */}
+                                  <div className="flex items-center gap-2">
+                                    {/* Gap Height Input (Primary Control) */}
+                                    {gapHeight !== null && (
+                                      <div className="flex items-center gap-1.5 flex-1">
+                                        <span className="text-xs text-gray-400">↕</span>
+                                        <input
+                                          type="number"
+                                          min={5}
+                                          max={shelfConfig.totalHeight}
+                                          step={1}
+                                          value={gapHeight}
+                                          onChange={(e) => {
+                                            const newGap = Number(e.target.value);
+                                            const newUpperPosition = nextLayer.yPosition + newGap;
+                                            if (newUpperPosition <= shelfConfig.totalHeight && newUpperPosition >= 0) {
+                                              updateLayerPosition(unit.id, layer.id, newUpperPosition);
+                                            }
+                                          }}
+                                          className="w-16 px-2 py-1 text-sm font-semibold text-center border border-blue-200 bg-blue-50 text-blue-600 rounded focus:outline-none focus:ring-2 focus:ring-blue-400 focus:border-blue-400"
+                                        />
+                                        <span className="text-xs text-gray-500">cm</span>
+                                      </div>
+                                    )}
+                                    
+                                    {isBase && (
+                                      <span className="text-xs text-gray-400 italic">固定</span>
+                                    )}
+                                  </div>
                                 </div>
 
                                 {!isBase && (

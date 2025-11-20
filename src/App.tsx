@@ -1,4 +1,3 @@
-import React from 'react';
 import { ConfigPanel } from './components/ConfigPanel';
 import { ProductLibrary } from './components/ProductLibrary';
 import { Workspace } from './components/Workspace';

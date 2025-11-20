@@ -8,6 +8,7 @@ const CATEGORIES = [
   { id: 'cleaning', label: '清洁' },
   { id: 'storage', label: '收纳' },
   { id: 'textile', label: '家纺' },
+  { id: 'hanging', label: '挂钩' },
 ] as const;
 
 export const ProductLibrary: React.FC = () => {
@@ -79,33 +80,53 @@ export const ProductLibrary: React.FC = () => {
 
       {/* Product List */}
       <div className="flex-1 overflow-y-auto p-4 pt-0 space-y-3">
-        {filteredProducts.map((product) => (
-          <div
-            key={product.id}
-            draggable
-            onDragStart={(e) => handleDragStart(e, product)}
-            onDragEnd={handleDragEnd}
-            className="group bg-white border border-gray-200 rounded-lg p-3 cursor-grab active:cursor-grabbing hover:shadow-md hover:border-blue-300 transition-all flex gap-3 items-center"
-          >
-            {/* Thumbnail */}
+        {filteredProducts.map((product) => {
+          const isHanging = product.displayType === 'hanging';
+          return (
             <div
-              className="w-12 h-12 rounded-md flex-shrink-0 shadow-inner"
-              style={{ backgroundColor: product.color }}
-            />
-            
-            <div className="flex-1 min-w-0">
-              <h4 className="text-sm font-medium text-gray-900 truncate group-hover:text-blue-600">
-                {product.name}
-              </h4>
-              <p className="text-xs text-gray-500 mt-1">
-                {product.width} x {product.height} cm
-              </p>
-              <span className="inline-block mt-1 px-1.5 py-0.5 bg-gray-100 text-gray-500 text-[10px] rounded">
-                {product.category}
-              </span>
+              key={product.id}
+              draggable
+              onDragStart={(e) => handleDragStart(e, product)}
+              onDragEnd={handleDragEnd}
+              className={`group bg-white border rounded-lg p-3 cursor-grab active:cursor-grabbing hover:shadow-md transition-all flex gap-3 items-center ${
+                isHanging 
+                  ? 'border-purple-300 hover:border-purple-400 bg-purple-50/30' 
+                  : 'border-gray-200 hover:border-blue-300'
+              }`}
+            >
+              {/* Thumbnail */}
+              <div className="relative w-12 h-12 rounded-md flex-shrink-0 shadow-inner" style={{ backgroundColor: product.color }}>
+                {/* Hook hole indicator for hanging products */}
+                {isHanging && (
+                  <div className="absolute top-1 left-1/2 -translate-x-1/2 w-2 h-2 bg-gray-700 rounded-full border border-gray-900" />
+                )}
+              </div>
+              
+              <div className="flex-1 min-w-0">
+                <h4 className={`text-sm font-medium truncate ${
+                  isHanging ? 'text-purple-700 group-hover:text-purple-800' : 'text-gray-900 group-hover:text-blue-600'
+                }`}>
+                  {product.name}
+                </h4>
+                <p className="text-xs text-gray-500 mt-1">
+                  {product.width} x {product.height} cm
+                </p>
+                <div className="flex items-center gap-1.5 mt-1">
+                  <span className={`inline-block px-1.5 py-0.5 text-[10px] rounded ${
+                    isHanging 
+                      ? 'bg-purple-100 text-purple-700 font-semibold' 
+                      : 'bg-gray-100 text-gray-500'
+                  }`}>
+                    {product.category}
+                  </span>
+                  {isHanging && (
+                    <span className="text-[10px] text-purple-600">🪝</span>
+                  )}
+                </div>
+              </div>
             </div>
-          </div>
-        ))}
+          );
+        })}
         
         {filteredProducts.length === 0 && (
           <div className="text-center py-10 text-gray-400 text-sm">
